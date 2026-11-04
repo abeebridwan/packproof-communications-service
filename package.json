@@ -22,7 +22,8 @@
     "test:browser": "playwright test",
     "env:local": "node scripts/environment.mjs local",
     "env:check": "node scripts/environment.mjs check",
-    "env:agent": "node scripts/environment.mjs agent"
+    "env:agent": "node scripts/environment.mjs agent",
+    "test:meta": "node --env-file=.env.local scripts/meta-smoke.mjs --run-live"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",

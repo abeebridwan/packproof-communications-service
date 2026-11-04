@@ -2,7 +2,6 @@ import { ServerOptions, cli, defineAgent, voice } from '@livekit/agents'
 import * as meta from '@livekit/agents-plugin-meta'
 import * as openai from '@livekit/agents-plugin-openai'
 import * as silero from '@livekit/agents-plugin-silero'
-import { ParticipantKind } from '@livekit/rtc-node'
 import { RoomServiceClient } from 'livekit-server-sdk'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +18,7 @@ import {
 } from '@packproof/verification-adapters'
 import { voiceSettings } from '@packproof/speech'
 import { createPackProofAgent } from './index.js'
+import { approvedInboundCall } from './telephony.js'
 
 dotenv.config({ path: '.env.local', quiet: true })
 export default defineAgent({
@@ -63,16 +63,9 @@ export default defineAgent({
       access = await verifyContext(ctx.job.metadata, secret, ctx.room.name!)
     else {
       // SIP attributes are set by LiveKit's SIP service. Caller ID never grants access.
-      const allowed = (process.env.LIVEKIT_ALLOWED_SIP_TRUNKS ?? '')
-        .split(',')
-        .filter(Boolean)
-      if (
-        participant.kind !== ParticipantKind.SIP ||
-        !participant.attributes['sip.trunkID'] ||
-        !allowed.includes(participant.attributes['sip.trunkID'])
-      )
+      if (!approvedInboundCall(participant, process.env))
         throw new Error(
-          'Authorized gateway dispatch or approved SIP trunk required',
+          'Authorized gateway dispatch or an approved inbound phone route required',
         )
       access = {
         sessionId: randomUUID(),
@@ -112,7 +105,8 @@ export default defineAgent({
       baseURL: 'https://api.meta.ai/v1',
       apiKey: process.env.MODEL_API_KEY,
       model: 'muse-spark-1.3',
-      maxCompletionTokens: 240,
+      maxCompletionTokens: 512,
+      reasoningEffort: 'minimal',
       parallelToolCalls: false,
       store: false,
     })

@@ -121,7 +121,8 @@ export class MuseScriptClient {
           },
           body: JSON.stringify({
             model: 'muse-spark-1.3',
-            max_completion_tokens: 180,
+            max_completion_tokens: 512,
+            reasoning_effort: 'minimal',
             messages: [
               {
                 role: 'system',

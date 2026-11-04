@@ -126,7 +126,7 @@ export function cloudAgentValues(env) {
       problems.push(`${name} must contain at least 32 characters`)
   if (env.META_LIVE_ENABLED !== 'true')
     problems.push(
-      'META_LIVE_ENABLED is disabled; a key alone is not spending approval',
+      'META_LIVE_ENABLED is disabled for unattended workers; bounded local tests use META_TEST_BUDGET_USD',
     )
   if (!publicSpeechEndpoint(env.KOKORO_BASE_URL))
     problems.push(
@@ -162,7 +162,12 @@ export function cloudAgentValues(env) {
       'PACKPROOF_API_TOKEN',
       'PACKPROOF_ENDPOINT_PATHS',
     )
-  if (env.LIVEKIT_ALLOWED_SIP_TRUNKS) names.push('LIVEKIT_ALLOWED_SIP_TRUNKS')
+  for (const name of [
+    'LIVEKIT_ALLOWED_SIP_TRUNKS',
+    'LIVEKIT_ALLOWED_PHONE_NUMBERS',
+    'LIVEKIT_ALLOWED_SIP_DISPATCH_RULES',
+  ])
+    if (env[name]) names.push(name)
   return {
     ready: true,
     problems: [],
@@ -224,7 +229,11 @@ export function reportEnvironment(root) {
     missing,
     localSecretMismatches: mismatched,
     metaInferenceEnabled: env.META_LIVE_ENABLED === 'true',
-    providerAccessTested: false,
+    providerAccessCheckedByThisCommand: false,
+    metaTestAllowanceUsd: Math.max(
+      0,
+      Math.min(10, Number(env.META_TEST_BUDGET_USD) || 0),
+    ),
     cloud: { ready: cloud.ready, problems: cloud.problems },
   }
 }
@@ -261,7 +270,8 @@ if (
             missing: r.missing,
             localSecretMismatches: r.localSecretMismatches,
             metaInferenceEnabled: r.metaInferenceEnabled,
-            providerAccessTested: false,
+            providerAccessCheckedByThisCommand: false,
+            metaTestAllowanceUsd: r.metaTestAllowanceUsd,
             cloudReady: r.cloud.ready,
             cloudBlockers: r.cloud.problems,
           },

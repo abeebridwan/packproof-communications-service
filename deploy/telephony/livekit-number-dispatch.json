@@ -1,0 +1,8 @@
+{
+  "dispatchRule": {
+    "name": "PackProof LiveKit inbound numbers",
+    "hidePhoneNumber": true,
+    "rule": { "dispatchRuleIndividual": { "roomPrefix": "pp-phone-" } },
+    "roomConfig": { "agents": [{ "agentName": "packproof-voice" }] }
+  }
+}
