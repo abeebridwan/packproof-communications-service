@@ -120,6 +120,7 @@ export const AccessContext = z.object({
     .max(2),
   expiresAt: z.number().int(),
   assertion: z.string().max(12000).optional(),
+  budgetReservationId: z.string().uuid().optional(),
 })
 export type AccessContext = z.infer<typeof AccessContext>
 export interface ConversationContext {

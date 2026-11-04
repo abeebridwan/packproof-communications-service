@@ -119,6 +119,7 @@ export function cloudAgentValues(env) {
     'VOICE_CONTEXT_SECRET',
     'KOKORO_BASE_URL',
     'KOKORO_SERVICE_TOKEN',
+    'VOICE_GATEWAY_PUBLIC_URL',
   ])
     if (!env[name]) problems.push(`${name} is missing`)
   for (const name of ['VOICE_CONTEXT_SECRET', 'KOKORO_SERVICE_TOKEN'])
@@ -132,6 +133,23 @@ export function cloudAgentValues(env) {
     problems.push(
       'KOKORO_BASE_URL needs a protected public HTTPS hostname ending in /v1; local Docker URLs cannot serve a Cloud worker',
     )
+  try {
+    const gateway = new URL(env.VOICE_GATEWAY_PUBLIC_URL)
+    if (
+      gateway.protocol !== 'https:' ||
+      gateway.username ||
+      gateway.password ||
+      gateway.search ||
+      gateway.hash ||
+      gateway.pathname !== '/' ||
+      !publicSpeechEndpoint(new URL('/v1', gateway).toString())
+    )
+      throw new Error()
+  } catch {
+    problems.push(
+      'VOICE_GATEWAY_PUBLIC_URL must be the reachable HTTPS gateway origin',
+    )
+  }
   if (!['fixtures', 'http'].includes(env.PACKPROOF_MODE))
     problems.push('PACKPROOF_MODE must be fixtures or http')
   if (env.PACKPROOF_MODE === 'http') {
@@ -155,6 +173,7 @@ export function cloudAgentValues(env) {
     'KOKORO_SERVICE_TOKEN',
     'META_LIVE_ENABLED',
     'PACKPROOF_MODE',
+    'VOICE_GATEWAY_PUBLIC_URL',
   ]
   if (env.PACKPROOF_MODE === 'http')
     names.push(
@@ -176,6 +195,7 @@ export function cloudAgentValues(env) {
         names.filter(name => env[name]).map(name => [name, env[name]]),
       ),
       ALLOW_LOCAL_SERVICES: 'false',
+      LOG_LEVEL: 'fatal',
     },
   }
 }

@@ -23,7 +23,12 @@
     "env:local": "node scripts/environment.mjs local",
     "env:check": "node scripts/environment.mjs check",
     "env:agent": "node scripts/environment.mjs agent",
-    "test:meta": "node --env-file=.env.local scripts/meta-smoke.mjs --run-live"
+    "test:meta": "node --env-file=.env.local scripts/meta-smoke.mjs --run-live",
+    "test:voice": "node --env-file=.env.local scripts/browser-voice-smoke.mjs --run-live",
+    "demo:invite": "node --env-file=.env.local scripts/demo-invite.mjs"
+  },
+  "dependencies": {
+    "@livekit/agents": "1.9.5"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",

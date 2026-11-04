@@ -8,6 +8,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@packproof/shared-contracts/meta-budget': new URL(
+        './packages/shared-contracts/src/meta-budget.ts',
+        import.meta.url,
+      ).pathname,
       '@packproof/shared-contracts': new URL(
         './packages/shared-contracts/src/index.ts',
         import.meta.url,

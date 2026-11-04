@@ -21,7 +21,11 @@ export class KokoroClient {
     this.base = trustedEndpoint(options.baseUrl, options.allowLocal)
     if (!options.token) throw new Error('KOKORO_SERVICE_TOKEN required')
   }
-  async speech(text: string, format: 'wav' | 'pcm' = 'wav'): Promise<Response> {
+  async speech(
+    text: string,
+    format: 'wav' | 'pcm' = 'wav',
+    signal?: AbortSignal,
+  ): Promise<Response> {
     if (!text.trim() || text.length > (this.options.maxChars ?? 900))
       throw new Error('Speech text exceeds limit')
     const url = new URL(
@@ -39,7 +43,9 @@ export class KokoroClient {
         response_format: format,
         stream: true,
       }),
-      signal: AbortSignal.timeout(45000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(45000)])
+        : AbortSignal.timeout(45000),
       redirect: 'error',
     })
     if (!result.ok || !result.body) throw new Error('Kokoro unavailable')

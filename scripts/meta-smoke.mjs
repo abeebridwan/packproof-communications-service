@@ -17,7 +17,7 @@ if (!process.argv.includes('--run-live'))
   throw new Error('Pass --run-live to explicitly run bounded paid Meta tests')
 if (!process.env.MODEL_API_KEY) throw new Error('MODEL_API_KEY is required')
 const budget = new MetaTestBudget(
-  '.runtime/meta-test-budget.sqlite',
+  process.env.META_BUDGET_PATH ?? '.runtime/gateway/meta-budget.sqlite',
   Number(process.env.META_TEST_BUDGET_USD ?? 0),
 )
 initializeLogger({ pretty: false, level: 'silent' })

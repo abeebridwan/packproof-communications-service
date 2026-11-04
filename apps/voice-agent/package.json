@@ -26,6 +26,7 @@
     "@packproof/verification-adapters": "workspace:*",
     "dotenv": "17.2.3",
     "livekit-server-sdk": "2.19.2",
+    "openai": "6.49.0",
     "zod": "4.6.7"
   }
 }

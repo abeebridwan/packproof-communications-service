@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
 import {
   llm,
   voice,
@@ -69,11 +69,6 @@ it('drives identifier intake, later confirmation and lookup through the real SDK
       return call('confirm_identifier', {
         sourceMessageId: control.latestUserMessageId,
       })
-    if (phase === 4)
-      return call('packproof_lookup', {
-        operation: 'verification',
-        itemId: '0071842',
-      })
     return [
       {
         id: randomUUID(),
@@ -91,10 +86,10 @@ it('drives identifier intake, later confirmation and lookup through the real SDK
     turnHandling: { turnDetection: 'manual' },
     userAwayTimeout: null,
   })
+  const client = new FixtureVerificationClient()
+  const lookup = vi.spyOn(client, 'lookup')
   const instance = createPackProofAgent({
-    provider: new PackProofVerificationProvider(
-      new FixtureVerificationClient(),
-    ),
+    provider: new PackProofVerificationProvider(client),
     access: {
       sessionId: randomUUID(),
       room: 'sdk-test',
@@ -117,19 +112,20 @@ it('drives identifier intake, later confirmation and lookup through the real SDK
     a.expect.nextEvent().isMessage({ role: 'assistant' })
     a.expect.noMoreEvents()
     expect(instance.state.pending?.delivered).toBe(true)
+    expect(lookup).not.toHaveBeenCalled()
     const b = await session
       .run({ userInput: 'Yes, those are the digits. Please check it.' })
       .wait()
     b.expect.nextEvent().isFunctionCall({ name: 'confirm_identifier' })
     b.expect.nextEvent().isFunctionCallOutput()
-    b.expect.nextEvent().isFunctionCall({
-      name: 'packproof_lookup',
-      args: { operation: 'verification', itemId: '0071842' },
-    })
-    b.expect.nextEvent().isFunctionCallOutput()
     const message = b.expect.nextEvent().isMessage({ role: 'assistant' })
     b.expect.noMoreEvents()
     expect(instance.state.conversation.itemId).toBe('0071842')
+    expect(lookup).toHaveBeenCalledExactlyOnceWith(
+      'verification',
+      { itemId: '0071842', sellerId: undefined },
+      expect.objectContaining({ access: 'public' }),
+    )
     expect(
       b.events
         .filter(e => e.type === 'message')

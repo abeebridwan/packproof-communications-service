@@ -1,4 +1,5 @@
-# Root build context includes the independent workspace packages.
-# lk agent create will add this project's assigned [agent] id.
 [project]
   subdomain = "packproof-voice-q0jp1pic"
+
+[agent]
+  id = "CA_yagFApEYUAtQ"

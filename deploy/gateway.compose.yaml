@@ -5,6 +5,7 @@ services:
     environment:
       SERVICE: gateway
       GATEWAY_STATE_PATH: /data/gateway.sqlite
+      META_BUDGET_PATH: /data/meta-budget.sqlite
     env_file: ../.env.local
     ports: ['127.0.0.1:8080:8080']
     volumes: ['../.runtime/gateway:/data']

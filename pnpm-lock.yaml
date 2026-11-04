@@ -10,6 +10,10 @@ overrides:
 importers:
 
   .:
+    dependencies:
+      '@livekit/agents':
+        specifier: 1.9.5
+        version: 1.9.5(@livekit/rtc-node@1.2.1)(@types/node@22.18.6)(typescript@5.9.3)(zod@4.6.7)
     devDependencies:
       '@playwright/test':
         specifier: 1.56.1
@@ -95,6 +99,9 @@ importers:
       livekit-server-sdk:
         specifier: 2.19.2
         version: 2.19.2
+      openai:
+        specifier: 6.49.0
+        version: 6.49.0(ws@8.22.1)(zod@4.6.7)
       zod:
         specifier: 4.6.7
         version: 4.6.7

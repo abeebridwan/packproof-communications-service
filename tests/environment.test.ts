@@ -44,6 +44,7 @@ function validCloud() {
     KOKORO_BASE_URL: 'https://speech.packproof.dev/v1',
     META_LIVE_ENABLED: 'true',
     PACKPROOF_MODE: 'fixtures',
+    VOICE_GATEWAY_PUBLIC_URL: 'https://gateway.packproof.dev',
   }
 }
 describe('environment setup and Cloud secret isolation', () => {
@@ -133,6 +134,7 @@ describe('environment setup and Cloud secret isolation', () => {
         exported = parseEnv(text)
       expect(exported.MODEL_API_KEY).toBe(env.MODEL_API_KEY)
       expect(exported.ALLOW_LOCAL_SERVICES).toBe('false')
+      expect(exported.LOG_LEVEL).toBe('fatal')
       for (const n of [
         'LIVEKIT_API_KEY',
         'LIVEKIT_API_SECRET',

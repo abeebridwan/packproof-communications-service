@@ -16,9 +16,12 @@ import {
   clientFromEnv,
   PackProofVerificationProvider,
 } from '@packproof/verification-adapters'
-import { voiceSettings } from '@packproof/speech'
+import { KokoroClient } from '@packproof/speech'
 import { createPackProofAgent } from './index.js'
 import { approvedInboundCall } from './telephony.js'
+import OpenAI from 'openai'
+import { boundedMetaFetch } from './meta-limits.js'
+import { KokoroTTS } from './kokoro.js'
 
 dotenv.config({ path: '.env.local', quiet: true })
 export default defineAgent({
@@ -79,6 +82,25 @@ export default defineAgent({
     }
     if (participant.identity !== access.identity)
       throw new Error('Caller identity mismatch')
+    // A single-use gateway claim prevents worker restarts or duplicate dispatch
+    // from spending the same lease twice. SIP admission is not enabled yet.
+    if (!access.budgetReservationId || !ctx.job.metadata)
+      throw new Error('A gateway-admitted Meta budget reservation is required')
+    const gateway = trustedEndpoint(
+      process.env.VOICE_GATEWAY_PUBLIC_URL ?? '',
+      process.env.ALLOW_LOCAL_SERVICES === 'true',
+    )
+    const admission = await fetch(new URL('/v1/voice/budget/claim', gateway), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${ctx.job.metadata}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+      redirect: 'error',
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!admission.ok) throw new Error('Meta budget admission denied')
     const roomApi = new RoomServiceClient(
       process.env.LIVEKIT_URL!.replace(/^wss:/, 'https:'),
       process.env.LIVEKIT_API_KEY,
@@ -102,10 +124,16 @@ export default defineAgent({
       ctx.shutdown()
     }
     const model = new openai.LLM({
+      client: new OpenAI({
+        baseURL: 'https://api.meta.ai/v1',
+        apiKey: process.env.MODEL_API_KEY,
+        maxRetries: 0,
+        fetch: boundedMetaFetch(),
+      }),
       baseURL: 'https://api.meta.ai/v1',
       apiKey: process.env.MODEL_API_KEY,
       model: 'muse-spark-1.3',
-      maxCompletionTokens: 512,
+      maxCompletionTokens: 2048,
       reasoningEffort: 'minimal',
       parallelToolCalls: false,
       store: false,
@@ -119,20 +147,21 @@ export default defineAgent({
         languageBias: ['English'],
       }),
       llm: model,
-      tts: new openai.TTS({
-        baseURL: base.toString().replace(/\/$/, ''),
-        apiKey: token,
-        model: 'kokoro',
-        voice: voiceSettings.voice as never,
-        sampleRate: voiceSettings.sampleRate,
-        speed: voiceSettings.speed,
-      }),
+      tts: new KokoroTTS(
+        new KokoroClient({
+          baseUrl: base.toString(),
+          token,
+          allowLocal: process.env.ALLOW_LOCAL_SERVICES === 'true',
+        }),
+      ),
       maxToolSteps: 3,
       userAwayTimeout: 45,
       transcriptionTimeout: 6000,
+      // Measured CPU Kokoro first audio can exceed the SDK's 10s default.
+      ttsReadIdleTimeout: 45000,
       connOptions: {
-        llmConnOptions: { maxRetry: 0, timeoutMs: 10000 },
-        sttConnOptions: { maxRetry: 1, timeoutMs: 10000 },
+        llmConnOptions: { maxRetry: 0, timeoutMs: 20000 },
+        sttConnOptions: { maxRetry: 0, timeoutMs: 10000 },
         ttsConnOptions: { maxRetry: 1, timeoutMs: 30000 },
       },
       turnHandling: {

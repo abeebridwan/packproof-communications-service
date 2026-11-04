@@ -8,11 +8,20 @@ import {
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MetaBudget } from '../packages/shared-contracts/src/meta-budget.js'
 import {
   createGateway,
   configFromEnv,
+  LiveKitRooms,
   type GatewayConfig,
 } from '../apps/gateway/src/index.js'
+import {
+  RoomServiceClient,
+  ServerError,
+} from '../apps/gateway/node_modules/livekit-server-sdk/dist/index.js'
 const config: GatewayConfig = {
   livekitUrl: 'wss://test.livekit.cloud',
   apiKey: 'test-api-key',
@@ -77,6 +86,70 @@ const request = (
     body: JSON.stringify(body),
   })
 describe('gateway authentication, isolation and cleanup', () => {
+  it('treats an already-ended LiveKit room as cleaned but retains genuine backend failures', async () => {
+    const deletion = vi.spyOn(RoomServiceClient.prototype, 'deleteRoom')
+    const backend = new LiveKitRooms(config)
+    try {
+      deletion.mockRejectedValueOnce(
+        new ServerError('not_found', 'room already ended', 404, 'not_found'),
+      )
+      await expect(
+        backend.deleteRoom('owned-ended-room'),
+      ).resolves.toBeUndefined()
+      deletion.mockRejectedValueOnce(
+        new ServerError('unavailable', 'retry required', 503, 'unavailable'),
+      )
+      await expect(backend.deleteRoom('owned-room')).rejects.toThrow(
+        'retry required',
+      )
+    } finally {
+      deletion.mockRestore()
+    }
+  })
+  it('admits a reserved voice budget once and rejects public invitations and replay', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pp-voice-budget-'))
+    const { url, backend } = await fixture({
+      metaBudget: { path: join(root, 'budget.sqlite'), approvedUsd: 4 },
+    })
+    cleanups.push(async () => rmSync(root, { recursive: true, force: true }))
+    expect((await request(url, await invite())).status).toBe(201)
+    const metadata = backend.dispatch.mock.calls[0]![1]
+    const claim = (token: string) =>
+      fetch(url + '/v1/voice/budget/claim', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+    expect((await claim(await invite())).status).toBe(401)
+    expect((await claim(metadata.slice(0, -8) + 'forged00')).status).toBe(401)
+    expect((await claim(metadata)).status).toBe(200)
+    expect((await claim(metadata)).status).toBe(403)
+    const ledger = new MetaBudget(join(root, 'budget.sqlite'), 4)
+    expect(ledger.summary().reservedOrUncertainUsd).toBe(2)
+    ledger.close()
+  })
+  it('shares prior test spending, persists voice reservations and refuses sessions before dispatch when exhausted', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pp-voice-total-'))
+    const path = join(root, 'budget.sqlite')
+    const seed = new MetaBudget(path, 4)
+    const id = seed.reserve('earlier-provider-test', 0.05)
+    seed.settle(id, { success: true, costUsd: 0.01 })
+    seed.close()
+    const { url, backend } = await fixture({
+      metaBudget: { path, approvedUsd: 4 },
+    })
+    cleanups.push(async () => rmSync(root, { recursive: true, force: true }))
+    expect((await request(url, await invite())).status).toBe(201)
+    const response = await request(url, await invite())
+    expect(response.status).toBe(429)
+    expect(backend.dispatch).toHaveBeenCalledOnce()
+    const ledger = new MetaBudget(path, 4)
+    expect(ledger.summary().conservativeRemainingUsd).toBe(1.99)
+    ledger.close()
+  })
   it('rejects unauthenticated, forged and expired token requests', async () => {
     const { url, backend } = await fixture()
     for (const token of [
@@ -119,7 +192,8 @@ describe('gateway authentication, isolation and cleanup', () => {
       roomJoin: true,
       canUpdateOwnMetadata: false,
     })
-    expect(jwt.exp! - jwt.nbf!).toBeLessThanOrEqual(60)
+    expect(jwt.exp! - jwt.nbf!).toBeLessThanOrEqual(300)
+    expect(jwt.exp!).toBeLessThanOrEqual(value.expiresAt)
     expect(jwt).not.toHaveProperty('apiSecret')
     expect(value).not.toHaveProperty('subject')
     expect(value).not.toHaveProperty('assertion')

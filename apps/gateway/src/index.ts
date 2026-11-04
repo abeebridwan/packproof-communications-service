@@ -18,14 +18,17 @@ import {
   AgentDispatchClient,
   RoomServiceClient,
   TrackSource,
+  ServerError,
 } from 'livekit-server-sdk'
 import { z } from 'zod'
 import {
   signContext,
   requireSecret,
   trustedEndpoint,
+  verifyContext,
   type AccessContext,
 } from '@packproof/shared-contracts'
+import { MetaBudget } from '@packproof/shared-contracts/meta-budget'
 
 export type GatewayConfig = {
   livekitUrl: string
@@ -37,6 +40,7 @@ export type GatewayConfig = {
   databasePath: string
   maxSessions: number
   maxSessionSeconds: number
+  metaBudget?: { path: string; approvedUsd: number }
   auth?: { issuer: string; audience: string; jwksUrl: string }
 }
 export interface RoomBackend {
@@ -64,7 +68,18 @@ export class LiveKitRooms implements RoomBackend {
     await this.agents.createDispatch(name, 'packproof-voice', { metadata })
   }
   async deleteRoom(name: string) {
-    await this.rooms.deleteRoom(name)
+    try {
+      await this.rooms.deleteRoom(name)
+    } catch (error) {
+      // The worker may already have ended the room before the client/reaper.
+      if (
+        error instanceof ServerError &&
+        error.code === 'not_found' &&
+        error.status === 404
+      )
+        return
+      throw error
+    }
   }
 }
 export function configFromEnv(e: NodeJS.ProcessEnv): GatewayConfig {
@@ -84,6 +99,13 @@ export function configFromEnv(e: NodeJS.ProcessEnv): GatewayConfig {
   if (auth) trustedEndpoint(auth.jwksUrl)
   if (!e.LIVEKIT_API_KEY || !e.LIVEKIT_API_SECRET)
     throw new Error('LiveKit credentials required')
+  if (
+    e.META_LIVE_ENABLED === 'true' &&
+    (!e.META_BUDGET_PATH || !(Number(e.META_TEST_BUDGET_USD) > 0))
+  )
+    throw new Error(
+      'Live voice requires the shared approved Meta budget ledger',
+    )
   const origins = (e.VOICE_ALLOWED_ORIGINS ?? '').split(',').filter(Boolean)
   if (
     !origins.length ||
@@ -103,6 +125,14 @@ export function configFromEnv(e: NodeJS.ProcessEnv): GatewayConfig {
     databasePath: e.GATEWAY_STATE_PATH ?? '.runtime/gateway.sqlite',
     maxSessions: 3,
     maxSessionSeconds: 300,
+    ...(e.META_LIVE_ENABLED === 'true'
+      ? {
+          metaBudget: {
+            path: e.META_BUDGET_PATH!,
+            approvedUsd: Number(e.META_TEST_BUDGET_USD),
+          },
+        }
+      : {}),
     auth,
   }
 }
@@ -132,8 +162,14 @@ export function createGateway(
 ) {
   mkdirSync(dirname(config.databasePath), { recursive: true })
   const db = new DatabaseSync(config.databasePath)
+  const budget = config.metaBudget
+    ? new MetaBudget(config.metaBudget.path, config.metaBudget.approvedUsd)
+    : undefined
   db.exec(
     `PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,room TEXT NOT NULL,subject TEXT NOT NULL,ip TEXT NOT NULL,expires INTEGER NOT NULL,cleanup TEXT NOT NULL); CREATE TABLE IF NOT EXISTS used_tokens(jti TEXT PRIMARY KEY,expires INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,reset INTEGER NOT NULL);`,
+  )
+  db.exec(
+    'CREATE TABLE IF NOT EXISTS budget_claims(session_id TEXT PRIMARY KEY,reservation_id TEXT NOT NULL UNIQUE,claimed INTEGER NOT NULL DEFAULT 0);',
   )
   const jwks = config.auth
     ? createRemoteJWKSet(new URL(config.auth.jwksUrl), {
@@ -243,8 +279,46 @@ export function createGateway(
       return reply(res, 200, { status: 'ok' })
     try {
       const token = req.headers.authorization?.match(/^Bearer ([^ ]+)$/)?.[1]
-      if (!token || token.length > 12000)
+      const internalClaim =
+        req.method === 'POST' && req.url === '/v1/voice/budget/claim'
+      if (!token || token.length > (internalClaim ? 24000 : 12000))
         throw new HttpError(401, 'Bearer authorization required')
+      if (internalClaim) {
+        z.object({})
+          .strict()
+          .parse(await body(req))
+        const verified = await jwtVerify(
+          token,
+          new TextEncoder().encode(config.contextSecret),
+          {
+            algorithms: ['HS256'],
+            issuer: 'packproof-voice-gateway',
+            audience: 'packproof-voice',
+          },
+        ).catch(() => {
+          throw new HttpError(401, 'Invalid agent context')
+        })
+        const room = verified.payload.room
+        if (typeof room !== 'string')
+          throw new HttpError(401, 'Invalid room binding')
+        const context = await verifyContext(token, config.contextSecret, room)
+        const changed = db
+          .prepare(
+            'UPDATE budget_claims SET claimed=1 WHERE session_id=? AND reservation_id=? AND claimed=0 AND session_id IN (SELECT id FROM sessions WHERE room=? AND expires>?)',
+          )
+          .run(
+            context.sessionId,
+            context.budgetReservationId ?? '',
+            room,
+            Math.floor(Date.now() / 1000),
+          ).changes
+        if (!budget || changed !== 1)
+          throw new HttpError(
+            403,
+            'Meta budget admission denied or already claimed',
+          )
+        return reply(res, 200, { admitted: true })
+      }
       const deletion = req.url?.match(
         /^\/v1\/voice\/sessions\/([0-9a-f-]{36})$/,
       )
@@ -319,6 +393,20 @@ export function createGateway(
         throw new HttpError(401, 'Assertion already used')
       }
       try {
+        let budgetReservationId: string | undefined
+        if (budget) {
+          try {
+            budgetReservationId = budget.reserve(
+              'voice-session:' + sessionId,
+              2,
+            )
+          } catch {
+            throw new HttpError(429, 'Approved Meta budget is fully reserved')
+          }
+          db.prepare(
+            'INSERT INTO budget_claims(session_id,reservation_id) VALUES(?,?)',
+          ).run(sessionId, budgetReservationId)
+        }
         const context: AccessContext = {
           sessionId,
           room,
@@ -327,6 +415,7 @@ export function createGateway(
           access,
           scopes,
           expiresAt: expires,
+          ...(budgetReservationId ? { budgetReservationId } : {}),
           ...(access === 'authenticated' ? { assertion: token } : {}),
         }
         await backend.createRoom(room)
@@ -336,7 +425,8 @@ export function createGateway(
         )
         const at = new AccessToken(config.apiKey, config.apiSecret, {
           identity,
-          ttl: Math.min(60, expires - now),
+          // The token must remain valid during SDK recovery within this lease.
+          ttl: Math.min(config.maxSessionSeconds, expires - now),
         })
         at.addGrant({
           roomJoin: true,
@@ -354,13 +444,14 @@ export function createGateway(
           expiresAt: expires,
           cleanupToken,
         })
-      } catch {
+      } catch (error) {
         try {
           await backend.deleteRoom(room)
           db.prepare('DELETE FROM sessions WHERE id=?').run(sessionId)
         } catch {
           /* retain durable cleanup lease */
         }
+        if (error instanceof HttpError) throw error
         throw new HttpError(503, 'Voice service unavailable')
       }
     } catch (error) {
@@ -383,6 +474,7 @@ export function createGateway(
   server.on('close', () => {
     clearInterval(timer)
     db.close()
+    budget?.close()
   })
   return { server, reap }
 }

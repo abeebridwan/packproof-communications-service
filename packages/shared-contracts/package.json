@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./meta-budget": {
+      "types": "./dist/meta-budget.d.ts",
+      "import": "./dist/meta-budget.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
