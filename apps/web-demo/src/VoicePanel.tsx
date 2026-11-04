@@ -8,8 +8,14 @@ import {
   useSession,
   useSessionMessages,
 } from '@livekit/components-react'
-import { TokenSource, RoomEvent, ParticipantKind } from 'livekit-client'
+import {
+  TokenSource,
+  RoomEvent,
+  ParticipantKind,
+  DisconnectReason,
+} from 'livekit-client'
 import { VerificationResult } from '@packproof/shared-contracts'
+import { checkVoiceMedia, microphoneMessage } from './mediaPreflight'
 
 export type VoicePanelProps = {
   gatewayUrl: string
@@ -22,11 +28,16 @@ export function VoicePanel(props: VoicePanelProps) {
   const [connection, setConnection] = useState<Connection>()
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState('')
+  const pending = useRef(false)
   async function connect() {
+    if (pending.current) return
+    pending.current = true
     setConnecting(true)
     setError('')
     try {
       const assertion = await props.getAssertion()
+      // Ask for media access before reserving a paid session or consuming an invitation.
+      await checkVoiceMedia()
       const response = await fetch(
         props.gatewayUrl.replace(/\/$/, '') + '/v1/voice/sessions',
         {
@@ -39,14 +50,23 @@ export function VoicePanel(props: VoicePanelProps) {
           signal: AbortSignal.timeout(15000),
         },
       )
-      if (!response.ok)
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}))
+        const retry = Number(
+          failure.retryAfterSeconds ?? response.headers.get('Retry-After'),
+        )
         throw new Error(
           response.status === 401
             ? 'Please sign in or use a fresh demo invitation.'
-            : response.status === 429
-              ? 'Voice sessions are busy. Please try later.'
-              : 'The voice service could not connect.',
+            : failure.code === 'budget_exhausted'
+              ? 'The demo voice allowance is fully reserved. Please ask for a budget review.'
+              : failure.code === 'rate_limited'
+                ? `The voice request limit was reached. Try again in ${Number.isFinite(retry) && retry > 0 ? Math.ceil(retry / 60) + ' minute(s)' : 'a few minutes'}.`
+                : failure.code === 'capacity_busy'
+                  ? 'All voice channels are in use. Try again shortly.'
+                  : 'The voice service could not connect. Your invitation can be retried if it has not expired.',
         )
+      }
       const data = await response.json()
       if (
         typeof data.serverUrl !== 'string' ||
@@ -61,6 +81,7 @@ export function VoicePanel(props: VoicePanelProps) {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Voice connection unavailable.')
     } finally {
+      pending.current = false
       setConnecting(false)
     }
   }
@@ -85,9 +106,7 @@ export function VoicePanel(props: VoicePanelProps) {
           {connecting ? 'Connecting…' : 'Connect microphone'}
         </button>
       )}
-      {error && (
-        <p role="alert">{error} You can retry with a new authorized session.</p>
-      )}
+      {error && <p role="alert">{error}</p>}
       <p className="muted">
         Calls last up to five minutes. Voice cannot inspect a physical item or
         sign a transfer.
@@ -149,9 +168,15 @@ function ActiveCall({
         },
       ).catch(() => {})
     }
-    const disconnected = () => {
+    const disconnected = (reason?: DisconnectReason) => {
       cleanup()
-      if (mounted) endRef.current()
+      if (mounted)
+        endRef.current(
+          reason === DisconnectReason.CLIENT_INITIATED ||
+            reason === DisconnectReason.ROOM_DELETED
+            ? undefined
+            : 'The voice connection was interrupted. Check your connection and WebRTC extension settings, then reconnect with a fresh invitation.',
+        )
     }
     session.room.on(RoomEvent.Disconnected, disconnected)
     void session
@@ -160,12 +185,7 @@ function ActiveCall({
       })
       .catch((e: unknown) => {
         cleanup()
-        if (mounted)
-          endRef.current(
-            e instanceof Error
-              ? e.message
-              : 'Microphone or connection unavailable.',
-          )
+        if (mounted) endRef.current(microphoneMessage(e))
       })
     return () => {
       mounted = false

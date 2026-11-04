@@ -1,4 +1,97 @@
 import { test, expect } from '@playwright/test'
+test.beforeEach(async ({ page }) => {
+  // Browser regression tests must never consume the running demo's quota.
+  await page.route('**/v1/voice/sessions', route =>
+    route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: '{"code":"request_denied"}',
+    }),
+  )
+})
+async function enterDemo(page: import('@playwright/test').Page) {
+  await page.goto('/')
+  await page.getByText('Authorized demo access', { exact: true }).click()
+  await page
+    .getByLabel('Short-lived invitation')
+    .fill('browser-test-invitation')
+}
+test('a WebRTC-blocking extension is explained before any room or budget is requested', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    for (const name of [
+      'RTCPeerConnection',
+      'webkitRTCPeerConnection',
+      'mozRTCPeerConnection',
+    ])
+      Object.defineProperty(window, name, {
+        value: undefined,
+        writable: true,
+        configurable: true,
+      })
+  })
+  let requests = 0
+  page.on('request', r => {
+    if (r.url().includes('/v1/voice/sessions')) requests++
+  })
+  await enterDemo(page)
+  await page.getByRole('button', { name: 'Connect microphone' }).click()
+  await expect(page.getByRole('alert')).toContainText(
+    'Allow WebRTC for this site',
+  )
+  expect(requests).toBe(0)
+})
+test('denied microphone permission does not consume a session or invitation', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = async () => {
+      throw new DOMException('denied', 'NotAllowedError')
+    }
+  })
+  let requests = 0
+  page.on('request', r => {
+    if (r.url().includes('/v1/voice/sessions')) requests++
+  })
+  await enterDemo(page)
+  await page.getByRole('button', { name: 'Connect microphone' }).click()
+  await expect(page.getByRole('alert')).toContainText(
+    'Allow the microphone for this site',
+  )
+  await expect(page.getByRole('alert')).not.toContainText('fresh')
+  expect(requests).toBe(0)
+})
+for (const failure of [
+  {
+    code: 'budget_exhausted',
+    retryAfterSeconds: 0,
+    expected: 'allowance is fully reserved',
+  },
+  { code: 'rate_limited', retryAfterSeconds: 180, expected: '3 minute(s)' },
+  {
+    code: 'capacity_busy',
+    retryAfterSeconds: 10,
+    expected: 'channels are in use',
+  },
+])
+  test(`explains ${failure.code} without mislabelling every limit as busy`, async ({
+    page,
+  }) => {
+    await page.route('**/v1/voice/sessions', route =>
+      route.fulfill({
+        status: 429,
+        contentType: 'application/json',
+        body: JSON.stringify(failure),
+      }),
+    )
+    await enterDemo(page)
+    await page.getByRole('button', { name: 'Connect microphone' }).click()
+    await expect(page.getByRole('alert')).toContainText(failure.expected)
+    await expect(page.getByRole('alert')).not.toContainText(
+      'new authorized session',
+    )
+  })
 test('mobile voice entry renders and rejects missing authorization without a room request', async ({
   page,
 }) => {

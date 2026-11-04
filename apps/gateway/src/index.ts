@@ -143,6 +143,8 @@ class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code = 'request_denied',
+    readonly retryAfterSeconds?: number,
   ) {
     super(message)
   }
@@ -230,7 +232,12 @@ export function createGateway(
       .prepare('SELECT count,reset FROM attempts WHERE key=?')
       .get(key) as { count: number; reset: number } | undefined
     if (old && old.reset > now && old.count >= limit)
-      throw new HttpError(429, 'Voice session limit reached')
+      throw new HttpError(
+        429,
+        'Voice session limit reached',
+        'rate_limited',
+        Math.max(1, old.reset - now),
+      )
     db.prepare(
       'INSERT INTO attempts VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET count=excluded.count,reset=excluded.reset',
     ).run(
@@ -239,6 +246,19 @@ export function createGateway(
       old && old.reset > now ? old.reset : now + windowSeconds,
     )
   }
+  function releaseUnclaimed(sessionId: string) {
+    if (!budget) return
+    // Fence first: a concurrent or delayed worker can never redeem a refunded lease.
+    db.prepare(
+      'UPDATE budget_claims SET claimed=-1 WHERE session_id=? AND claimed=0',
+    ).run(sessionId)
+    const row = db
+      .prepare(
+        'SELECT reservation_id FROM budget_claims WHERE session_id=? AND claimed=-1',
+      )
+      .get(sessionId)
+    if (row) budget.releaseUnspent(row.reservation_id as string)
+  }
   async function reap() {
     const now = Math.floor(Date.now() / 1000)
     const expired = db
@@ -246,6 +266,7 @@ export function createGateway(
       .all(now) as { id: string; room: string }[]
     for (const s of expired) {
       try {
+        releaseUnclaimed(s.id)
         await backend.deleteRoom(s.room)
         db.prepare('DELETE FROM sessions WHERE id=?').run(s.id)
       } catch {
@@ -255,6 +276,14 @@ export function createGateway(
     db.prepare('DELETE FROM used_tokens WHERE expires<=?').run(now)
     db.prepare('DELETE FROM attempts WHERE reset<=?').run(now)
   }
+  // Recover holds from prior browser failures and crashes, without refunding a
+  // single reservation that an agent actually claimed.
+  for (const row of db
+    .prepare(
+      'SELECT session_id FROM budget_claims WHERE claimed=-1 OR (claimed=0 AND session_id NOT IN (SELECT id FROM sessions))',
+    )
+    .all())
+    releaseUnclaimed(row.session_id as string)
   const timer = setInterval(() => void reap().catch(() => {}), 10000)
   timer.unref()
   const server = createServer(async (req, res) => {
@@ -268,6 +297,7 @@ export function createGateway(
         'Access-Control-Allow-Headers',
         'Authorization, Content-Type',
       )
+      res.setHeader('Access-Control-Expose-Headers', 'Retry-After')
       res.setHeader('Access-Control-Allow-Methods', 'POST, DELETE, OPTIONS')
     }
     if (req.method === 'OPTIONS') {
@@ -284,6 +314,8 @@ export function createGateway(
       if (!token || token.length > (internalClaim ? 24000 : 12000))
         throw new HttpError(401, 'Bearer authorization required')
       if (internalClaim) {
+        if (!budget)
+          throw new HttpError(403, 'Meta budget admission is disabled')
         z.object({})
           .strict()
           .parse(await body(req))
@@ -312,7 +344,7 @@ export function createGateway(
             room,
             Math.floor(Date.now() / 1000),
           ).changes
-        if (!budget || changed !== 1)
+        if (changed !== 1)
           throw new HttpError(
             403,
             'Meta budget admission denied or already claimed',
@@ -331,6 +363,7 @@ export function createGateway(
           !timingSafeEqual(Buffer.from(hash(token)), Buffer.from(row.cleanup))
         )
           throw new HttpError(403, 'Session cleanup denied')
+        releaseUnclaimed(deletion[1]!)
         await backend.deleteRoom(row.room)
         db.prepare('DELETE FROM sessions WHERE id=?').run(deletion[1]!)
         return reply(res, 200, { ended: true })
@@ -338,7 +371,7 @@ export function createGateway(
       if (req.method !== 'POST' || req.url !== '/v1/voice/sessions')
         throw new HttpError(404, 'Not found')
       const ip = hash(req.socket.remoteAddress ?? 'unknown')
-      rate('ip:' + ip, 10)
+      rate('attempt:' + ip, 30, 60)
       z.object({})
         .strict()
         .parse(await body(req)) // no client identity, room, agent or role accepted
@@ -356,8 +389,6 @@ export function createGateway(
           401,
           'Short-lived assertion with subject and nonce required',
         )
-      rate('subject:' + hash(payload.sub), 5)
-      rate('global-day', 20, 86400)
       const expires = Math.min(payload.exp, now + config.maxSessionSeconds)
       if (expires - now < 20)
         throw new HttpError(401, 'Assertion expires too soon')
@@ -365,6 +396,8 @@ export function createGateway(
         room = 'pp-voice-' + sessionId,
         identity = 'caller-' + randomUUID(),
         cleanupToken = randomBytes(32).toString('base64url')
+      let budgetReservationId: string | undefined
+      const quotaWindows: { key: string; reset: number }[] = []
       db.exec('BEGIN IMMEDIATE')
       try {
         const count = (
@@ -373,7 +406,46 @@ export function createGateway(
           }
         ).n
         if (count >= config.maxSessions)
-          throw new HttpError(429, 'All voice sessions are busy')
+          throw new HttpError(
+            429,
+            'All voice sessions are busy',
+            'capacity_busy',
+            10,
+          )
+        if (
+          db.prepare('SELECT 1 FROM used_tokens WHERE jti=?').get(payload.jti)
+        )
+          throw new HttpError(401, 'Assertion already used', 'invitation_used')
+        for (const [key, limit, window] of [
+          ['ip:' + ip, 10, 3600],
+          ['subject:' + hash(payload.sub), 5, 3600],
+          ['global-day', 20, 86400],
+        ] as const) {
+          rate(key, limit, window)
+          quotaWindows.push({
+            key,
+            reset: db
+              .prepare('SELECT reset FROM attempts WHERE key=?')
+              .get(key)!.reset as number,
+          })
+        }
+        if (budget) {
+          try {
+            budgetReservationId = budget.reserve(
+              'voice-session:' + sessionId,
+              2,
+            )
+          } catch {
+            throw new HttpError(
+              429,
+              'Approved Meta budget is fully reserved',
+              'budget_exhausted',
+            )
+          }
+          db.prepare(
+            'INSERT INTO budget_claims(session_id,reservation_id) VALUES(?,?)',
+          ).run(sessionId, budgetReservationId)
+        }
         db.prepare('INSERT INTO used_tokens VALUES(?,?)').run(
           payload.jti,
           payload.exp,
@@ -389,24 +461,11 @@ export function createGateway(
         db.exec('COMMIT')
       } catch (error) {
         db.exec('ROLLBACK')
+        if (budgetReservationId) budget?.releaseUnspent(budgetReservationId)
         if (error instanceof HttpError) throw error
         throw new HttpError(401, 'Assertion already used')
       }
       try {
-        let budgetReservationId: string | undefined
-        if (budget) {
-          try {
-            budgetReservationId = budget.reserve(
-              'voice-session:' + sessionId,
-              2,
-            )
-          } catch {
-            throw new HttpError(429, 'Approved Meta budget is fully reserved')
-          }
-          db.prepare(
-            'INSERT INTO budget_claims(session_id,reservation_id) VALUES(?,?)',
-          ).run(sessionId, budgetReservationId)
-        }
         const context: AccessContext = {
           sessionId,
           room,
@@ -445,6 +504,13 @@ export function createGateway(
           cleanupToken,
         })
       } catch (error) {
+        releaseUnclaimed(sessionId)
+        // No client token was issued. Undo quota/nonce changes for safe retry.
+        for (const q of quotaWindows)
+          db.prepare(
+            'UPDATE attempts SET count=MAX(0,count-1) WHERE key=? AND reset=?',
+          ).run(q.key, q.reset)
+        db.prepare('DELETE FROM used_tokens WHERE jti=?').run(payload.jti)
         try {
           await backend.deleteRoom(room)
           db.prepare('DELETE FROM sessions WHERE id=?').run(sessionId)
@@ -455,6 +521,8 @@ export function createGateway(
         throw new HttpError(503, 'Voice service unavailable')
       }
     } catch (error) {
+      if (error instanceof HttpError && error.retryAfterSeconds)
+        res.setHeader('Retry-After', String(error.retryAfterSeconds))
       return reply(
         res,
         error instanceof HttpError
@@ -465,6 +533,10 @@ export function createGateway(
         {
           error:
             error instanceof HttpError ? error.message : 'Request unavailable',
+          code: error instanceof HttpError ? error.code : 'request_unavailable',
+          ...(error instanceof HttpError && error.retryAfterSeconds
+            ? { retryAfterSeconds: error.retryAfterSeconds }
+            : {}),
         },
       )
     }

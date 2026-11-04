@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { MetaBudget } from '../packages/shared-contracts/src/meta-budget.js'
 import {
   createGateway,
@@ -149,6 +150,125 @@ describe('gateway authentication, isolation and cleanup', () => {
     const ledger = new MetaBudget(path, 4)
     expect(ledger.summary().conservativeRemainingUsd).toBe(1.99)
     ledger.close()
+  })
+  it('releases an unclaimed browser hold and allows the same rejected invitation to retry without quota consumption', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pp-budget-retry-')),
+      path = join(root, 'budget.sqlite')
+    const { url } = await fixture({ metaBudget: { path, approvedUsd: 2 } })
+    cleanups.push(async () => rmSync(root, { recursive: true, force: true }))
+    const first = await (await request(url, await invite())).json()
+    const retryToken = await invite()
+    for (let i = 0; i < 6; i++) {
+      const blocked = await request(url, retryToken)
+      expect(blocked.status).toBe(429)
+      expect((await blocked.json()).code).toBe('budget_exhausted')
+    }
+    expect(
+      (
+        await fetch(url + '/v1/voice/sessions/' + first.sessionId, {
+          method: 'DELETE',
+          headers: { Authorization: 'Bearer ' + first.cleanupToken },
+        })
+      ).status,
+    ).toBe(200)
+    const retry = await request(url, retryToken)
+    expect(retry.status).toBe(201)
+    const b = new MetaBudget(path, 2)
+    expect(b.summary().reservedOrUncertainUsd).toBe(2)
+    b.close()
+  })
+  it('keeps claimed budgets charged after cleanup and denies replay of a cancelled claim', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pp-budget-claimed-')),
+      path = join(root, 'budget.sqlite')
+    const { url, backend } = await fixture({
+      metaBudget: { path, approvedUsd: 4 },
+    })
+    cleanups.push(async () => rmSync(root, { recursive: true, force: true }))
+    const claim = (token: string) =>
+      fetch(url + '/v1/voice/budget/claim', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+    const first = await (await request(url, await invite())).json()
+    const firstContext = backend.dispatch.mock.calls[0]![1]
+    expect((await claim(firstContext)).status).toBe(200)
+    await fetch(url + '/v1/voice/sessions/' + first.sessionId, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer ' + first.cleanupToken },
+    })
+    const second = await (await request(url, await invite())).json()
+    const secondContext = backend.dispatch.mock.calls[1]![1]
+    let finishDeletion!: () => void
+    backend.deleteRoom.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishDeletion = resolve
+        }),
+    )
+    const pendingDeletion = fetch(
+      url + '/v1/voice/sessions/' + second.sessionId,
+      {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer ' + second.cleanupToken },
+      },
+    )
+    await vi.waitFor(() => expect(backend.deleteRoom).toHaveBeenCalledTimes(2))
+    expect((await claim(secondContext)).status).toBe(403)
+    finishDeletion()
+    await pendingDeletion
+    const b = new MetaBudget(path, 4)
+    expect(b.summary().reservedOrUncertainUsd).toBe(2)
+    b.close()
+  })
+  it('recovers abandoned unclaimed reservations on restart while retaining claimed provider work', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pp-budget-restart-')),
+      path = join(root, 'budget.sqlite'),
+      databasePath = join(root, 'gateway.sqlite')
+    const seed = new MetaBudget(path, 4)
+    const unclaimed = seed.reserve('never-joined', 2),
+      claimed = seed.reserve('provider-started', 2)
+    seed.close()
+    const db = new DatabaseSync(databasePath)
+    db.exec(
+      'CREATE TABLE budget_claims(session_id TEXT PRIMARY KEY,reservation_id TEXT NOT NULL UNIQUE,claimed INTEGER NOT NULL DEFAULT 0)',
+    )
+    db.prepare('INSERT INTO budget_claims VALUES(?,?,?)').run(
+      randomUUID(),
+      unclaimed,
+      0,
+    )
+    db.prepare('INSERT INTO budget_claims VALUES(?,?,?)').run(
+      randomUUID(),
+      claimed,
+      1,
+    )
+    db.close()
+    await fixture({ databasePath, metaBudget: { path, approvedUsd: 4 } })
+    cleanups.push(async () => rmSync(root, { recursive: true, force: true }))
+    const ledger = new MetaBudget(path, 4)
+    expect(ledger.summary().conservativeRemainingUsd).toBe(2)
+    ledger.close()
+  })
+  it('keeps a failed dispatch retryable without charging quota or unclaimed inference', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pp-dispatch-retry-')),
+      path = join(root, 'budget.sqlite')
+    const { url, backend } = await fixture({
+      metaBudget: { path, approvedUsd: 2 },
+    })
+    cleanups.push(async () => rmSync(root, { recursive: true, force: true }))
+    const token = await invite()
+    for (let i = 0; i < 6; i++) {
+      backend.dispatch.mockRejectedValueOnce(new Error('network unavailable'))
+      expect((await request(url, token)).status).toBe(503)
+    }
+    expect((await request(url, token)).status).toBe(201)
+    const b = new MetaBudget(path, 2)
+    expect(b.summary().reservedOrUncertainUsd).toBe(2)
+    b.close()
   })
   it('rejects unauthenticated, forged and expired token requests', async () => {
     const { url, backend } = await fixture()

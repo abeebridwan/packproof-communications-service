@@ -87,6 +87,20 @@ export class MetaBudget {
       requests: row.requests,
     }
   }
+  // Call only after a durable gate proves the worker never claimed this lease.
+  releaseUnspent(id: string) {
+    const row = this.db
+      .prepare('SELECT state FROM reservations WHERE id=?')
+      .get(id)
+    if (row?.state === 'cancelled') return
+    const changed = this.db
+      .prepare(
+        "UPDATE reservations SET state='cancelled',charged_micro=0 WHERE id=? AND state='reserved'",
+      )
+      .run(id).changes
+    if (changed !== 1)
+      throw new Error('Only an unspent reservation can be released')
+  }
   close() {
     this.db.close()
   }
