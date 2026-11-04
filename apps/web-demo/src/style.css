@@ -1,0 +1,133 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #193a32;
+  background: #f2f5ef;
+  font-synthesis: none;
+  line-height: 1.6;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 760px;
+  padding: 7vh 24px 40px;
+  margin: auto;
+}
+.voice-panel {
+  background: #fff;
+  border: 1px solid #d8e3d7;
+  border-radius: 28px;
+  padding: clamp(24px, 6vw, 56px);
+  box-shadow: 0 24px 70px #2348310b;
+}
+h1 {
+  font-size: clamp(2.2rem, 6vw, 3.7rem);
+  line-height: 1.08;
+  letter-spacing: -0.05em;
+  max-width: 560px;
+  font-weight: 650;
+}
+h2 {
+  font-size: 1.2rem;
+}
+.eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  color: #597666;
+}
+p {
+  max-width: 540px;
+}
+button {
+  border: 0;
+  border-radius: 999px;
+  background: #225d46;
+  color: white;
+  padding: 15px 24px;
+  font: inherit;
+  cursor: pointer;
+  margin: 14px 0;
+}
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 3px solid #e4ad46;
+  outline-offset: 4px;
+}
+.secondary {
+  background: #e9eee6;
+  color: #254738;
+}
+.muted {
+  font-size: 0.85rem;
+  color: #68786e;
+}
+a {
+  color: #245d49;
+}
+details {
+  margin: 24px 8px;
+  font-size: 0.9rem;
+}
+input {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #98b29c;
+  border-radius: 8px;
+  margin-top: 8px;
+}
+.status {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 30px;
+}
+.orb {
+  display: block;
+  width: 18px;
+  height: 18px;
+  background: #9caf9c;
+  border-radius: 50%;
+}
+.speaking .orb {
+  background: #d09b3d;
+  animation: pulse 1s infinite;
+}
+.listening .orb {
+  background: #3a8962;
+}
+.transcript {
+  max-height: 240px;
+  overflow: auto;
+  font-size: 0.9rem;
+}
+.transcript:empty {
+  display: none;
+}
+article,
+aside {
+  border-top: 1px solid #dde7dc;
+  margin-top: 30px;
+  padding-top: 20px;
+}
+audio {
+  width: 100%;
+}
+[role='alert'] {
+  color: #9e3826;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orb {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+coverage/
+.runtime/
+*.log
+recordings/
+playwright-report/
+test-results/
+.serena/

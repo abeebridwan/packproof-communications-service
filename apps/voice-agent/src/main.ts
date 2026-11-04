@@ -1,0 +1,230 @@
+import { ServerOptions, cli, defineAgent, voice } from '@livekit/agents'
+import * as meta from '@livekit/agents-plugin-meta'
+import * as openai from '@livekit/agents-plugin-openai'
+import * as silero from '@livekit/agents-plugin-silero'
+import { ParticipantKind } from '@livekit/rtc-node'
+import { RoomServiceClient } from 'livekit-server-sdk'
+import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import dotenv from 'dotenv'
+import {
+  verifyContext,
+  requireSecret,
+  trustedEndpoint,
+  type AccessContext,
+} from '@packproof/shared-contracts'
+import {
+  clientFromEnv,
+  PackProofVerificationProvider,
+} from '@packproof/verification-adapters'
+import { voiceSettings } from '@packproof/speech'
+import { createPackProofAgent } from './index.js'
+
+dotenv.config({ path: '.env.local', quiet: true })
+export default defineAgent({
+  prewarm: async proc => {
+    proc.userData.vad = await silero.VAD.load()
+  },
+  entry: async ctx => {
+    if (!process.env.MODEL_API_KEY || process.env.META_LIVE_ENABLED !== 'true')
+      throw new Error(
+        'Approved live Meta credentials and META_LIVE_ENABLED=true are required for audio sessions',
+      )
+    const base = trustedEndpoint(
+      process.env.KOKORO_BASE_URL ?? '',
+      process.env.ALLOW_LOCAL_SERVICES === 'true',
+    )
+    if (
+      process.env.NODE_ENV === 'production' &&
+      ['localhost', '127.0.0.1', 'kokoro', 'tts-proxy'].includes(base.hostname)
+    )
+      throw new Error(
+        'Cloud workers require a reachable protected Kokoro HTTPS endpoint',
+      )
+    const token = process.env.KOKORO_SERVICE_TOKEN
+    if (!token) throw new Error('Protected Kokoro credentials required')
+    const secret = requireSecret(
+      process.env.VOICE_CONTEXT_SECRET,
+      'VOICE_CONTEXT_SECRET',
+    )
+    await ctx.connect()
+    let joinTimer: ReturnType<typeof setTimeout>
+    const participant = await Promise.race([
+      ctx.waitForParticipant(),
+      new Promise<never>((_resolve, reject) => {
+        joinTimer = setTimeout(() => {
+          ctx.shutdown()
+          reject(new Error('Caller did not join in time'))
+        }, 20000)
+      }),
+    ]).finally(() => clearTimeout(joinTimer))
+    let access: AccessContext
+    if (ctx.job.metadata)
+      access = await verifyContext(ctx.job.metadata, secret, ctx.room.name!)
+    else {
+      // SIP attributes are set by LiveKit's SIP service. Caller ID never grants access.
+      const allowed = (process.env.LIVEKIT_ALLOWED_SIP_TRUNKS ?? '')
+        .split(',')
+        .filter(Boolean)
+      if (
+        participant.kind !== ParticipantKind.SIP ||
+        !participant.attributes['sip.trunkID'] ||
+        !allowed.includes(participant.attributes['sip.trunkID'])
+      )
+        throw new Error(
+          'Authorized gateway dispatch or approved SIP trunk required',
+        )
+      access = {
+        sessionId: randomUUID(),
+        room: ctx.room.name!,
+        identity: participant.identity,
+        subject: 'anonymous-sip',
+        access: 'public',
+        scopes: ['verification:public'],
+        expiresAt: Math.floor(Date.now() / 1000) + 300,
+      }
+    }
+    if (participant.identity !== access.identity)
+      throw new Error('Caller identity mismatch')
+    const roomApi = new RoomServiceClient(
+      process.env.LIVEKIT_URL!.replace(/^wss:/, 'https:'),
+      process.env.LIVEKIT_API_KEY,
+      process.env.LIVEKIT_API_SECRET,
+    )
+    const telemetry = (event: string, details?: Record<string, unknown>) =>
+      console.info(
+        JSON.stringify({
+          service: 'voice-agent',
+          sessionId: access.sessionId,
+          event,
+          ...details,
+        }),
+      )
+    const startedAt = Date.now()
+    let stopping = false
+    const stop = () => {
+      if (stopping) return
+      stopping = true
+      // The shutdown callback closes providers before attempting network cleanup.
+      ctx.shutdown()
+    }
+    const model = new openai.LLM({
+      baseURL: 'https://api.meta.ai/v1',
+      apiKey: process.env.MODEL_API_KEY,
+      model: 'muse-spark-1.3',
+      maxCompletionTokens: 240,
+      parallelToolCalls: false,
+      store: false,
+    })
+    const session = new voice.AgentSession({
+      vad: ctx.proc.userData.vad as silero.VAD,
+      stt: new meta.STT({
+        apiKey: process.env.MODEL_API_KEY,
+        model: 'muse-voice-transcribe-1.0',
+        keywords: ['PackProof', 'ChainProof', 'Inspector'],
+        languageBias: ['English'],
+      }),
+      llm: model,
+      tts: new openai.TTS({
+        baseURL: base.toString().replace(/\/$/, ''),
+        apiKey: token,
+        model: 'kokoro',
+        voice: voiceSettings.voice as never,
+        sampleRate: voiceSettings.sampleRate,
+        speed: voiceSettings.speed,
+      }),
+      maxToolSteps: 3,
+      userAwayTimeout: 45,
+      transcriptionTimeout: 6000,
+      connOptions: {
+        llmConnOptions: { maxRetry: 0, timeoutMs: 10000 },
+        sttConnOptions: { maxRetry: 1, timeoutMs: 10000 },
+        ttsConnOptions: { maxRetry: 1, timeoutMs: 30000 },
+      },
+      turnHandling: {
+        turnDetection: 'stt',
+        interruption: { mode: 'vad', enabled: true, minDuration: 400 },
+        preemptiveGeneration: { enabled: false },
+      },
+    })
+    const { agent, bindSession } = createPackProofAgent({
+      provider: new PackProofVerificationProvider(clientFromEnv(process.env)),
+      access,
+      model,
+      telemetry,
+      onEnd: stop,
+      publish: async result => {
+        await ctx.room.localParticipant?.publishData(
+          new TextEncoder().encode(JSON.stringify(result)),
+          {
+            reliable: true,
+            topic: 'packproof.verification',
+            destination_identities: [access.identity],
+          },
+        )
+      },
+    })
+    bindSession(session)
+    const lifetime = setTimeout(
+      stop,
+      Math.max(0, Math.min(300000, access.expiresAt * 1000 - Date.now())),
+    )
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, e => {
+      if (e.newState === 'away') stop()
+    })
+    session.on(voice.AgentSessionEventTypes.Error, event => {
+      telemetry('provider_error', { provider: event.error.type })
+      // llmNode owns the deterministic spoken fallback; speech-provider failures end the call.
+      if (event.error.type !== 'llm_error') stop()
+    })
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, e =>
+      telemetry('agent_state', { state: e.newState }),
+    )
+    session.on(voice.AgentSessionEventTypes.UserTranscriptionTimeout, () => {
+      telemetry('transcription_timeout')
+      void session.say(
+        'I could not hear the full identifier. Please repeat it one character at a time.',
+      )
+    })
+    session.on(voice.AgentSessionEventTypes.Close, () => {
+      clearTimeout(lifetime)
+      telemetry('session_closed', {
+        durationSeconds: Math.ceil((Date.now() - startedAt) / 1000),
+      })
+      stop()
+    })
+    ctx.addShutdownCallback(async () => {
+      clearTimeout(lifetime)
+      await session.close()
+      await Promise.race([
+        roomApi
+          .deleteRoom(access.room)
+          .catch(() => telemetry('room_cleanup_failed')),
+        new Promise<void>(resolve => {
+          const t = setTimeout(resolve, 5000)
+          t.unref()
+        }),
+      ])
+    })
+    await session.start({
+      agent,
+      room: ctx.room,
+      record: false,
+      inputOptions: {
+        participantIdentity: access.identity,
+        closeOnDisconnect: true,
+      },
+    })
+    session.say(
+      process.env.PACKPROOF_MODE === 'fixtures'
+        ? 'This is a fixture-only PackProof demonstration. Please tell me the product ID.'
+        : 'Hello. I can help check PackProof evidence. Please tell me the product ID.',
+    )
+  },
+})
+cli.runApp(
+  new ServerOptions({
+    agent: fileURLToPath(import.meta.url),
+    agentName: 'packproof-voice',
+  }),
+)

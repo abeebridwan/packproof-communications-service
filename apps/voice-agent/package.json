@@ -1,0 +1,31 @@
+{
+  "name": "@packproof/voice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@livekit/agents": "1.9.5",
+    "@livekit/agents-plugin-meta": "1.9.5",
+    "@livekit/agents-plugin-openai": "1.9.5",
+    "@livekit/agents-plugin-silero": "1.9.5",
+    "@livekit/rtc-node": "1.2.1",
+    "@packproof/shared-contracts": "workspace:*",
+    "@packproof/speech": "workspace:*",
+    "@packproof/verification-adapters": "workspace:*",
+    "dotenv": "17.2.3",
+    "livekit-server-sdk": "2.19.2",
+    "zod": "4.6.7"
+  }
+}

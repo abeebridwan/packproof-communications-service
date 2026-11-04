@@ -1,0 +1,23 @@
+services:
+  gateway:
+    image: packproof-communications:local
+    build: { context: .., dockerfile: Dockerfile }
+    environment:
+      SERVICE: gateway
+      GATEWAY_STATE_PATH: /data/gateway.sqlite
+    env_file: ../.env.local
+    ports: ['127.0.0.1:8080:8080']
+    volumes: ['../.runtime/gateway:/data']
+    # Prepare ownership once for the image's node UID (1000) on the host/volume.
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://localhost:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3

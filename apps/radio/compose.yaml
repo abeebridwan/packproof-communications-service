@@ -1,0 +1,99 @@
+name: packproof-communications
+services:
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.0
+    restart: unless-stopped
+    networks: [speech]
+    mem_limit: 3g
+    cpus: 2
+    environment:
+      USE_GPU: 'false'
+      LOG_LEVEL: WARNING
+    healthcheck:
+      test:
+        [
+          CMD,
+          python,
+          -c,
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 90s
+  tts-proxy:
+    image: nginx:1.28.0-alpine
+    restart: unless-stopped
+    environment:
+      KOKORO_SERVICE_TOKEN: ${KOKORO_SERVICE_TOKEN:?Generate local environment first}
+      NGINX_ENVSUBST_FILTER: ^KOKORO_SERVICE_TOKEN$$
+    volumes:
+      - ../../deploy/kokoro/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports: ['127.0.0.1:8880:8880']
+    networks: [speech, radio]
+    depends_on:
+      kokoro: { condition: service_healthy }
+  icecast:
+    image: packproof-icecast:local
+    build: ./icecast
+    restart: unless-stopped
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?Generate local environment first}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:?Generate local environment first}
+    ports: ['127.0.0.1:8000:8000']
+    networks: [radio]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8000/status-json.xsl]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  radio-worker:
+    image: packproof-communications:local
+    build: { context: ../.., dockerfile: Dockerfile }
+    restart: unless-stopped
+    environment:
+      SERVICE: radio
+      RADIO_MODE: ${RADIO_MODE:-fixtures}
+      RADIO_DATA_DIR: /data
+      ALLOW_LOCAL_SERVICES: 'true'
+      META_LIVE_ENABLED: ${META_LIVE_ENABLED:-false}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      KOKORO_BASE_URL: http://tts-proxy:8880/v1
+      KOKORO_SERVICE_TOKEN: ${KOKORO_SERVICE_TOKEN:?Generate local environment first}
+      RADIO_CONTROL_TOKEN: ${RADIO_CONTROL_TOKEN:?Generate local environment first}
+      RADIO_EVENT_SOURCE_URL: ${RADIO_EVENT_SOURCE_URL:-}
+      RADIO_EVENT_SOURCE_TOKEN: ${RADIO_EVENT_SOURCE_TOKEN:-}
+    ports: ['127.0.0.1:8787:8787']
+    volumes: ['../../.runtime/radio:/data']
+    networks: [radio]
+    depends_on:
+      tts-proxy: { condition: service_started }
+      icecast: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  liquidsoap:
+    user: '1000:1000'
+    image: savonet/liquidsoap:v2.3.3
+    restart: unless-stopped
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?Generate local environment first}
+      RADIO_CONTROL_TOKEN: ${RADIO_CONTROL_TOKEN:?Generate local environment first}
+    command: ['/etc/liquidsoap/radio.liq']
+    volumes:
+      - ./liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - ../../.runtime/radio/media:/data/media:ro
+    networks: [radio]
+    depends_on:
+      radio-worker: { condition: service_healthy }
+networks:
+  speech: {}
+  radio: {}

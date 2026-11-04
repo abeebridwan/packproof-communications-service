@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+onlyBuiltDependencies:
+  - '@livekit/rtc-node'
+  - '@livekit/agents'
+  - '@livekit/agents-plugin-silero'
+  - 'onnxruntime-node'
+  - 'esbuild'

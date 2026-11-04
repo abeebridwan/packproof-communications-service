@@ -1,0 +1,15 @@
+# Optional TLS ingress on the chosen container host. Set real domain names in
+# the proxy's environment; DNS must point to that host. No service is provisioned.
+{$VOICE_GATEWAY_DOMAIN} {
+  reverse_proxy gateway:8080
+}
+{$KOKORO_DOMAIN} {
+  reverse_proxy tts-proxy:8880
+}
+{$RADIO_DOMAIN} {
+  @stream path /packproof.mp3
+  handle @stream {
+    reverse_proxy icecast:8000
+  }
+  respond 404
+}

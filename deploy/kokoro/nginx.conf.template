@@ -1,0 +1,24 @@
+map_hash_bucket_size 128;
+limit_req_zone $binary_remote_addr zone=speech_rate:10m rate=1r/s;
+limit_conn_zone $server_name zone=speech_concurrency:10m;
+map $http_authorization $speech_authorized { default 0; "Bearer ${KOKORO_SERVICE_TOKEN}" 1; }
+server {
+ listen 8880;
+ server_tokens off;
+ client_max_body_size 4k;
+ client_body_timeout 5s;
+ location = /healthz { access_log off; return 200 'ok'; }
+ location = /v1/audio/speech {
+  if ($speech_authorized = 0) { return 401; }
+  limit_except POST { deny all; }
+  limit_req zone=speech_rate burst=4 nodelay;
+  limit_conn speech_concurrency 2;
+  proxy_pass http://kokoro:8880/v1/audio/speech;
+  proxy_set_header Authorization "";
+  proxy_buffering off;
+  proxy_read_timeout 45s;
+  proxy_send_timeout 10s;
+  access_log off;
+ }
+ location / { return 404; }
+}

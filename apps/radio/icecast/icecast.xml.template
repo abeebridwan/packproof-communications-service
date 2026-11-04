@@ -1,0 +1,9 @@
+<icecast>
+ <location>PackProof demo</location><admin>operator@localhost</admin><hostname>localhost</hostname>
+ <limits><clients>20</clients><sources>1</sources><queue-size>524288</queue-size><client-timeout>20</client-timeout><header-timeout>15</header-timeout><source-timeout>10</source-timeout><burst-size>65535</burst-size></limits>
+ <authentication><source-password>${ICECAST_SOURCE_PASSWORD}</source-password><relay-password>${ICECAST_SOURCE_PASSWORD}</relay-password><admin-user>admin</admin-user><admin-password>${ICECAST_ADMIN_PASSWORD}</admin-password></authentication>
+ <listen-socket><port>8000</port><bind-address>0.0.0.0</bind-address></listen-socket>
+ <mount type="normal"><mount-name>/packproof.mp3</mount-name><public>0</public><max-listeners>20</max-listeners><stream-name>PackProof Demo Radio</stream-name><stream-description>Sample notices with original background audio</stream-description></mount>
+ <fileserve>1</fileserve><paths><basedir>/usr/share/icecast2</basedir><logdir>/tmp/icecast</logdir><webroot>/usr/share/icecast2/web</webroot><adminroot>/usr/share/icecast2/admin</adminroot></paths>
+ <logging><accesslog>access.log</accesslog><errorlog>error.log</errorlog><loglevel>2</loglevel><logsize>1000</logsize></logging>
+</icecast>

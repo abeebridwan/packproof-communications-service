@@ -1,0 +1,26 @@
+{
+  "name": "@packproof/web-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./VoicePanel": "./src/VoicePanel.tsx"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@packproof/shared-contracts": "workspace:*",
+    "@livekit/components-react": "2.9.24",
+    "livekit-client": "2.23.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "vite": "6.4.5"
+  }
+}
