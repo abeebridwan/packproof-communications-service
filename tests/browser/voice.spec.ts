@@ -47,3 +47,11 @@ test('an expired invitation shows an actionable retry and does not expose eviden
     page.getByRole('heading', { name: 'Evidence references' }),
   ).toHaveCount(0)
 })
+
+test('the development server refuses direct access to the private root environment file', async ({
+  request,
+}) => {
+  const rootEnv = new URL('../../.env.local', import.meta.url).pathname
+  const response = await request.get('/@fs' + rootEnv)
+  expect(response.status()).toBe(403)
+})

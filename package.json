@@ -19,7 +19,10 @@
     "start": "node apps/voice-agent/dist/main.js start",
     "radio:up": "docker compose --env-file .runtime/local.env -f apps/radio/compose.yaml up -d --build",
     "radio:down": "docker compose --env-file .runtime/local.env -f apps/radio/compose.yaml down",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "env:local": "node scripts/environment.mjs local",
+    "env:check": "node scripts/environment.mjs check",
+    "env:agent": "node scripts/environment.mjs agent"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
